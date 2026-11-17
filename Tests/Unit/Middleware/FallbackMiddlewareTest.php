@@ -92,6 +92,16 @@ final class FallbackMiddlewareTest extends AbstractMiddlewareTest
         self::assertFalse($response->hasHeader('Content-Encoding'));
     }
 
+    public function testStaticFileIsStreamedFromDisk(): void
+    {
+        file_put_contents($this->staticFile, 'cached');
+
+        $response = $this->getMiddleware()->process($this->getRequest(), $this->getHandler(new HtmlResponse('typo3')));
+
+        self::assertSame($this->staticFile, $response->getBody()->getMetadata('uri'));
+        self::assertSame('cached', (string) $response->getBody());
+    }
+
     public function testNoCacheHeadersWithoutCacheHeaderConfiguration(): void
     {
         file_put_contents($this->staticFile, 'cached');

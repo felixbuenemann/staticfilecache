@@ -16,7 +16,8 @@ use SFC\Staticfilecache\Service\CacheHeaderService;
 use SFC\Staticfilecache\Service\CacheService;
 use SFC\Staticfilecache\Service\ConfigurationService;
 use SFC\Staticfilecache\Service\CookieService;
-use TYPO3\CMS\Core\Http\HtmlResponse;
+use TYPO3\CMS\Core\Http\Response;
+use TYPO3\CMS\Core\Http\Stream;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 
 class FallbackMiddleware implements MiddlewareInterface
@@ -63,35 +64,41 @@ class FallbackMiddleware implements MiddlewareInterface
 
         $possibleStaticFile = $this->identifierBuilder->getFilepath((string) $uri);
 
+        $cacheDirectory = $this->cacheService->getAbsoluteBaseDirectory();
+        if (!str_starts_with($possibleStaticFile, $cacheDirectory)) {
+            throw new Exception('The path is not in the cache directory', 348923472);
+        }
+
+        // The configuration is read once per request and shared with getHeaders().
         $config = $this->getCacheConfiguration($possibleStaticFile);
 
         if (isset($config['invalidAtTimestamp']) && $config['invalidAtTimestamp'] < time()) {
             throw new Exception('Cache entry is old', 16237867241);
         }
 
-        $headers = $this->getHeaders($event->getRequest(), $possibleStaticFile);
+        $headers = $this->getHeaders($event->getRequest(), $possibleStaticFile, $config);
 
-        if (!is_file($possibleStaticFile) || !is_readable($possibleStaticFile)) {
+        // Stream the file instead of reading it into a string and copying it into a
+        // php://temp body. fopen() also checks existence and readability in one call.
+        $handle = is_file($possibleStaticFile) ? @fopen($possibleStaticFile, 'rb') : false;
+        if (false === $handle) {
             throw new Exception('StaticFileCache file not found', 126371823);
         }
 
-        $cacheDirectory = $this->cacheService->getAbsoluteBaseDirectory();
-        if (!str_starts_with($possibleStaticFile, $cacheDirectory)) {
-            throw new Exception('The path is not in the cache directory', 348923472);
-        }
-
-        return new HtmlResponse(GeneralUtility::getUrl($possibleStaticFile), 200, $headers);
+        return new Response(new Stream($handle), 200, $headers);
     }
 
     /**
+     * @param array<mixed>|null $config The cache configuration of the file; read from disk when null
+     *
      * @return array<string, string>
      */
-    protected function getHeaders(ServerRequestInterface $request, string &$possibleStaticFile): array
+    protected function getHeaders(ServerRequestInterface $request, string &$possibleStaticFile, ?array $config = null): array
     {
         $headers = [
             'Content-Type' => 'text/html; charset=utf-8',
         ];
-        $config = $this->getCacheConfiguration($possibleStaticFile);
+        $config ??= $this->getCacheConfiguration($possibleStaticFile);
 
         foreach ($config['headers'] ?? [] as $header => $value) {
             $headers[$header] = $value;
@@ -125,7 +132,7 @@ class FallbackMiddleware implements MiddlewareInterface
 
         $acceptedEncodings = $this->getAcceptedEncodings($request);
         foreach (['br' => '.br', 'gzip' => '.gz'] as $encoding => $extension) {
-            if (\in_array($encoding, $acceptedEncodings, true) && is_file($possibleStaticFile . $extension) && is_readable($possibleStaticFile . $extension)) {
+            if (\in_array($encoding, $acceptedEncodings, true) && is_file($possibleStaticFile . $extension)) {
                 $headers['Content-Encoding'] = $encoding;
                 $possibleStaticFile .= $extension;
                 break;
@@ -178,10 +185,11 @@ class FallbackMiddleware implements MiddlewareInterface
     protected function getCacheConfiguration(string $possibleStaticFile): array
     {
         $configFile = $possibleStaticFile . '.config.json';
-        if (is_file($configFile) && is_readable($configFile)) {
-            return (array) json_decode((string) GeneralUtility::getUrl($configFile), true);
+        if (!is_file($configFile)) {
+            return [];
         }
+        $content = @file_get_contents($configFile);
 
-        return [];
+        return false === $content ? [] : (array) json_decode($content, true);
     }
 }
